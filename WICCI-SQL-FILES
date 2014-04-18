@@ -1,0 +1,18 @@
+text-ref-schema.sql  s2-core.sql-out
+text-ref-code.sql
+text-ref-test.sql
+#text-ref.sql
+env-ops.sql
+scalar-ref-code.sql
+bool-ref-schema.sql
+bool-ref-code.sql
+float-ref-schema.sql
+float-ref-code.sql
+int-ref-schema.sql
+int-ref-code.sql
+scalar-ref-test.sql
+array-ref-schema.sql
+array-ref-code.sql
+array-ref-test.sql
+#more-ready.sql
+s3-more.sql
