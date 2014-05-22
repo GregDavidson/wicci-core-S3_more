@@ -81,7 +81,11 @@ COMMENT ON TABLE bool_rows IS 'represents a typed boolean value';
 COMMENT ON COLUMN bool_rows.env IS
 'The environment containing the literals for this object.
 When it defaults to env_nil(), then the actual environment
-comes from a parameter or default to bool_ref_env() - tricky!';
+comes from a parameter or default to bool_ref_env() - tricky!
+Possible future optimization:
+Booleans can be direct references for env_rows but with their
+special type.  The sign of the row reference can be the truth
+value: postive=true, negative=false, 0=nil.';
 
 SELECT create_handles_for('bool_rows');
 

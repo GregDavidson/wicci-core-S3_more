@@ -12,13 +12,123 @@ SELECT set_file('text_refs-schema.sql', '$Id');
 --	as specified in the file LICENSE.md included with this distribution.
 --	All other use requires my permission in writing.
 
--- ** Virtual Text
+-- ** Text Values
 
 -- See text_refs-notes.text for more information.
 
--- A piece of Virtual Text is either a Leaf or a Tree or a Subrange.
+-- A Text Value is either a Leaf or some kind of Tree.
 -- All Leaf objects can cheaply compute their length
--- Molecules are pieces of Virtual Context-dependent Text
+
+-- Some Great Things no longer exist here as the
+-- evoolution of the WIcci no longer required them:
+-- Molecules, i.e. text templates which can be
+-- instatiated with value vectors to fulfill the
+-- contracts on template slots.
+-- Richer Text, i.e. Text Values with embedded
+-- Environment references giving context for
+-- rendering and interpreting the text.
+
+-- Text is coming soon, but first: Blobs!
+
+-- ** Blobs
+
+-- A blob value is a lot like text, in that it's a
+-- sequence of bytes.  It also has the advantage
+-- of not running afoul of PostgreSQL's limit of
+-- about 2K indexes on text strings, the
+-- prohibition of certain characters, e.g. ASCII NUL
+-- and the complexities of character set encodings.
+-- Blobs cannot be directly rendered as text.
+-- From the viewpoint of the Wicci, Blobs are
+-- opaque values which are passed to clients
+-- in binary chunks when requested.
+
+SELECT create_ref_type('blob_refs');
+
+/*
+ Blobs can be text or binary data and are always encoded as bytea.
+ Whoever stores something in a blob needs to know what it
+ represents!!  If it's really just text, recover it with
+	encode(bytea_value, 'escape') --> text
+ and backslash codes will quote non-printing characters.
+ */
+
+/* From https://stackoverflow.com/questions/15982737/postgresql-data-type-for-md5-message-digest
+md5('my_string') --> 32 hex characters of text
+decode(md5('my_string'), 'hex') --> 16 bytes of bytea
+digest('my_string', 'md5') same as last but requires:
+create extension pgcrypto;
+
+To avoid bytea one byte overhead + padding to eight bytes
+we can (kludge-alert!!) use the uuid type, also 16 bytes.
+"uuid"s will print with dashes when cast to text, so:
+md5('my_string')::uuid -> uuid
+REPLACE(md5_uuid::text, '-', '') -> text
+REPLACE(md5_uuid::text, '-', '')::bytea -> bytea
+See the hash functions in text-ref-code.sql
+*/
+
+-- CREATE DOMAIN blob_hashes AS char(32); -- extra overhead
+-- CREATE DOMAIN blob_hashes AS bytea;  -- extra overhead
+CREATE DOMAIN blob_hashes AS uuid; -- efficient & convenient kludge??
+CREATE DOMAIN blob_hash_arrays AS uuid[]; -- efficient & convenient kludge??
+
+CREATE OR REPLACE
+FUNCTION blob_hash_nil()
+RETURNS blob_hashes AS $$
+	SELECT '00000000000000000000000000000000'::uuid::blob_hashes
+$$ LANGUAGE SQL IMMUTABLE;
+
+CREATE OR REPLACE
+FUNCTION blob_hash(bytea) RETURNS blob_hashes AS $$
+	SELECT md5($1)::uuid::blob_hashes
+$$ LANGUAGE SQL;
+
+CREATE OR REPLACE
+FUNCTION blob_hash(text) RETURNS blob_hashes AS $$
+	SELECT md5($1)::uuid::blob_hashes
+$$ LANGUAGE SQL;
+
+CREATE TABLE IF NOT EXISTS blob_rows (
+	ref blob_refs PRIMARY KEY,
+	hash_ blob_hashes NOT NULL UNIQUE,
+	chunks blob_hash_arrays NOT NULL CHECK(array_length(chunks, 1) > 0)
+);
+COMMENT ON TABLE blob_rows IS '
+	unique typed text blobs with unique refs;
+	their refs may not be shared with other processes;
+	they may be aggressively garbage collected
+';
+COMMENT ON COLUMN blob_rows.hash_ IS '
+  When length(chunks) == 1, it''s just chunks[1]->hash_;
+  Otherwise it''s a hash of the contents of the chunks array.
+	Hmm, would it be better to have it be a hash of the
+	whole byte value of the blob???  This might be more
+	stable over the evolution of this code???
+';
+
+CREATE OR REPLACE
+FUNCTION blob_chunks_max_size() RETURNS integer AS $$
+	SELECT 1000000
+$$ language sql IMMUTABLE;
+
+COMMENT ON FUNCTION blob_chunks_max_size()
+IS 'Global parameter!  Adjust for best results!';
+
+CREATE TABLE IF NOT EXISTS blob_chunks (
+	hash_ blob_hashes NOT NULL UNIQUE,
+	chunk_ bytea NOT NULL,
+	CHECK (length(chunk_) < blob_chunks_max_size())
+);
+COMMENT ON TABLE blob_chunks IS '
+	unique byte array blobs indexed by their hashes;
+	they should not be too big to transmit as values
+	to clients; they can be part of larger blobs referenced
+	by blob_rows.
+';
+
+SELECT declare_ref_class_with_funcs('blob_rows');
+SELECT create_simple_serial('blob_rows');
 
 -- ** type text_refs
 
@@ -75,7 +185,7 @@ FUNCTION next_text(regclass) RETURNS text_refs AS $$
 	)
 $$ LANGUAGE SQL;
 
--- * Concrete Leaf Class
+-- * Concrete Leaf Classes
 
 -- ** TABLE text_string_rows(ref text_refs,  string_ text)
 

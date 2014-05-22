@@ -54,10 +54,7 @@ $$ LANGUAGE sql VOLATILE STRICT;
 
 CREATE OR REPLACE
 FUNCTION find_text(text) RETURNS text_refs AS $$
-	SELECT non_null(
-		try_text($1),
-		'find_text(text)'
-	)
+	SELECT non_null(	try_text($1),	'find_text(text)' )
 $$ LANGUAGE sql VOLATILE;
 COMMENT ON FUNCTION find_text(text) IS
 'return unique ref associated with text argument
@@ -177,6 +174,168 @@ SELECT type_class_op_method(
 SELECT type_class_op_method(
 	'text_refs', 'text_string_rows',
 	'ref_length_op(refs)', 'text_string_length(text_refs)'
+);
+
+-- *** blob_rows functions
+
+CREATE OR REPLACE
+FUNCTION try_get_chunks_hash(blob_hash_arrays) RETURNS blob_hashes AS $$
+	SELECT	md5(
+		array_to_string(
+			ARRAY( SELECT replace(x::text, '-', '') FROM unnest($1) x ),
+			'')
+	)::uuid::blob_hashes
+$$ LANGUAGE SQL STRICT;
+
+COMMENT ON FUNCTION try_get_chunks_hash(blob_hash_arrays)
+IS 'It would be better to use a hash of the entire content -
+which can now be passed in to get_static_doc and
+get_static_xfiles_page if doc-to-sql can be made to provide
+it!!!';
+
+CREATE OR REPLACE
+FUNCTION get_chunks_hash(blob_hash_arrays) RETURNS blob_hashes AS $$
+	SELECT non_null(
+		try_get_chunks_hash($1), 'try_get_chunks_hash(blob_hash_arrays)'
+	)
+$$ LANGUAGE SQL;
+
+-- +++ blob_to_len(blob_refs) -> text
+CREATE OR REPLACE
+FUNCTION try_blob_length(blob_refs)  RETURNS bigint AS $$
+	SELECT SUM( octet_length(chunk_) )
+	FROM blob_chunks c, blob_rows r
+	WHERE r.ref = $1 AND c.hash_::uuid = ANY((r.chunks)::uuid[])
+$$ LANGUAGE SQL STRICT;
+
+CREATE OR REPLACE
+FUNCTION blob_length(blob_refs) RETURNS bigint AS $$
+	SELECT non_null(
+		try_blob_length($1),	'blob_length(blob_refs)'
+	)
+$$ LANGUAGE SQL;
+
+COMMENT ON FUNCTION blob_length(blob_refs) IS
+'return length of blob associated with ref,
+which should exist, in bytes';
+
+-- +++ blob_text(blob_refs) -> text
+CREATE OR REPLACE
+FUNCTION blob_text(blob_refs) RETURNS text AS $$
+	SELECT 'blob'::text WHERE false
+$$ LANGUAGE SQL;
+COMMENT ON FUNCTION blob_text(blob_refs) IS
+'we need a convenient way to deal with blob values as a sequence';
+
+DELETE FROM blob_chunks;
+DELETE FROM blob_rows;
+
+INSERT INTO blob_chunks(hash_, chunk_)
+SELECT md5(x)::blob_hashes, x
+FROM unnest(ARRAY(
+	SELECT decode(h::text, 'hex'::text)
+	FROM unnest(ARRAY[ 'dead', 'beef' ]) h
+)) x;
+
+INSERT INTO blob_rows (hash_, chunks)
+SELECT blob_hash('deadbeef'::bytea), ARRAY(SELECT hash_::uuid FROM blob_chunks)::blob_hash_arrays;
+
+CREATE OR REPLACE
+FUNCTION blob_bytes(blob_refs) RETURNS bytea AS $$
+	SELECT string_agg(x, ''::bytea)	FROM
+		blob_rows r,
+		unnest(ARRAY(
+		SELECT c.chunk_ FROM blob_chunks c, blob_rows r, LATERAL unnest(r.chunks) h
+		WHERE r.ref = $1 AND c.hash_ = h
+	)) x
+$$ LANGUAGE SQL;
+
+COMMENT ON FUNCTION blob_text(blob_refs) IS
+'we need a convenient way to deal with blob values as a sequence';
+
+CREATE OR REPLACE
+FUNCTION blob_num_chunks(blob_refs) RETURNS integer AS $$
+		SELECT array_length(chunks, 1) FROM blob_rows
+		WHERE ref = non_null($1, 'blob_num_chunks(blob_refs)')
+$$ LANGUAGE SQL;
+COMMENT ON FUNCTION blob_num_chunks(blob_refs) IS
+'return number of chunks of blob associated with ref,
+which should exist';
+
+CREATE OR REPLACE
+FUNCTION blob_chunk(blob_refs, integer) RETURNS bytea AS $$
+	SELECT chunk_ FROM blob_chunks c, blob_rows r
+	WHERE r.ref = non_null($1, 'blob_chunk(blob_refs, integer)')
+	AND c.hash_ = r.chunks[$2]::blob_hashes
+$$ LANGUAGE SQL;
+COMMENT ON FUNCTION blob_chunk(blob_refs, integer) IS
+'return contents of specified chunk of specified blob which must exist';
+
+DELETE FROM blob_chunks;
+DELETE FROM blob_rows;
+
+CREATE OR REPLACE
+FUNCTION try_get_blob_chunk(bytea) RETURNS blob_hashes AS $$
+	DECLARE
+		hash blob_hashes := NULL;
+		kilroy_was_here boolean := false;
+		this regprocedure := 'try_get_blob_chunk(bytea)';
+	BEGIN
+		LOOP
+			SELECT hash_ INTO hash FROM blob_chunks WHERE chunk_ = $1;
+			IF FOUND THEN RETURN hash; END IF;
+			IF kilroy_was_here THEN
+				RAISE EXCEPTION '% looping with %', this, $1;
+			END IF;
+			kilroy_was_here := true;
+			BEGIN
+				INSERT INTO blob_chunks(hash_, chunk_) VALUES(blob_hash($1), $1);
+			EXCEPTION
+				WHEN unique_violation THEN			-- another thread??
+					RAISE NOTICE '% % raised %!', this, $1, 'unique_violation';
+			END;
+		END LOOP;
+	END;
+$$ LANGUAGE plpgsql STRICT VOLATILE;
+COMMENT ON FUNCTION try_get_text(text) IS
+'return unique hash associated with typea argument
+in the blob_chunks table, creating it if necessary';
+
+CREATE OR REPLACE
+FUNCTION try_get_blob(blob_hash_arrays) RETURNS blob_refs AS $$
+	DECLARE
+		blob blob_refs := NULL; -- unchecked_ref_null();
+		kilroy_was_here boolean := false;
+		this regprocedure := 'try_get_blob(blob_hash_arrays)';
+	BEGIN
+		LOOP
+			SELECT ref INTO blob FROM blob_rows WHERE chunks = $1;
+			IF FOUND THEN RETURN blob; END IF;
+			IF kilroy_was_here THEN
+				RAISE EXCEPTION '% looping with %', this, $1;
+			END IF;
+			kilroy_was_here := true;
+			BEGIN
+				INSERT INTO blob_rows(hash_, chunks) VALUES(get_chunks_hash($1), $1);
+			EXCEPTION
+				WHEN unique_violation THEN			-- another thread??
+					RAISE NOTICE '% % raised %!', this, $1, 'unique_violation';
+			END;
+		END LOOP;
+	END;
+$$ LANGUAGE plpgsql STRICT VOLATILE;
+COMMENT ON FUNCTION try_get_text(text) IS
+'return unique ref associated with blob chunks array
+in the blob_rows table, creating it if necessary';
+
+SELECT type_class_op_method(
+	'blob_refs', 'blob_rows',
+	'ref_text_op(refs)', 'blob_text(blob_refs)'
+);
+
+SELECT type_class_op_method(
+	'blob_refs', 'blob_rows',
+	'ref_length_op(refs)', 'blob_length(blob_refs)'
 );
 
 -- ** TABLE text_join_tree_rows

@@ -56,7 +56,7 @@ COMMENT ON COLUMN int_rows.env IS
 'Should probably be derived from one of the environments
 in int_units, or perhaps env_nil() - perhaps a
 int_ref_env() default would be a good idea, like we did
-with bool_ref_env()';
+with bool_ref_env()!!';
 
 SELECT create_handles_for('int_rows');
 
