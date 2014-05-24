@@ -12,7 +12,7 @@ SELECT set_file('text_refs-schema.sql', '$Id');
 --	as specified in the file LICENSE.md included with this distribution.
 --	All other use requires my permission in writing.
 
--- ** Text Values
+-- ** Text and Bytea Values, Size Limits & Hashes
 
 -- See text_refs-notes.text for more information.
 
@@ -20,7 +20,7 @@ SELECT set_file('text_refs-schema.sql', '$Id');
 -- All Leaf objects can cheaply compute their length
 
 -- Some Great Things no longer exist here as the
--- evoolution of the WIcci no longer required them:
+-- evolution of the WIcci no longer required them:
 -- Molecules, i.e. text templates which can be
 -- instatiated with value vectors to fulfill the
 -- contracts on template slots.
@@ -28,22 +28,34 @@ SELECT set_file('text_refs-schema.sql', '$Id');
 -- Environment references giving context for
 -- rendering and interpreting the text.
 
--- Text is coming soon, but first: Blobs!
+-- *** Size Limits
 
--- ** Blobs
+-- While PostgreSQL allows text and bytea values to be
+-- very large, if they're more than a third of a buffer page
+-- they can't be indexed!!
 
--- A blob value is a lot like text, in that it's a
--- sequence of bytes.  It also has the advantage
--- of not running afoul of PostgreSQL's limit of
--- about 2K indexes on text strings, the
--- prohibition of certain characters, e.g. ASCII NUL
--- and the complexities of character set encodings.
--- Blobs cannot be directly rendered as text.
--- From the viewpoint of the Wicci, Blobs are
--- opaque values which are passed to clients
--- in binary chunks when requested.
+CREATE OR REPLACE
+FUNCTION max_indexable_field_size() RETURNS integer AS $$
+	SELECT 2712
+$$ LANGUAGE SQL IMMUTABLE;
 
-SELECT create_ref_type('blob_refs');
+COMMENT ON FUNCTION max_indexable_field_size()
+IS 'PostgreSQL does not allow btree indices on fields above 1/3 of
+a buffer page, i.e. 2712 bytes.';
+
+CREATE OR REPLACE
+FUNCTION max_blob_chunk_size() RETURNS integer AS $$
+	SELECT max_indexable_field_size() -- adjust for best performance
+$$ LANGUAGE SQL IMMUTABLE;
+
+COMMENT ON FUNCTION max_blob_chunk_size()
+IS 'Large text or bytea values are broken up into chunks of
+at most this size; adjust for best performance.';
+
+-- ** Hashes
+
+-- text or bytea fields larger than max_indexable_field_size() need
+-- to be indexed indirectly through hashes:
 
 /*
  Blobs can be text or binary data and are always encoded as bytea.
@@ -68,31 +80,47 @@ REPLACE(md5_uuid::text, '-', '')::bytea -> bytea
 See the hash functions in text-ref-code.sql
 */
 
--- CREATE DOMAIN blob_hashes AS char(32); -- extra overhead
--- CREATE DOMAIN blob_hashes AS bytea;  -- extra overhead
-CREATE DOMAIN blob_hashes AS uuid; -- efficient & convenient kludge??
-CREATE DOMAIN blob_hash_arrays AS uuid[]; -- efficient & convenient kludge??
+-- CREATE DOMAIN hashes AS char(32); -- extra overhead
+-- CREATE DOMAIN hashes AS bytea;  -- extra overhead
+CREATE DOMAIN hashes AS uuid; -- efficient & convenient kludge??
+CREATE DOMAIN hash_arrays AS uuid[]; -- efficient & convenient kludge??
 
 CREATE OR REPLACE
-FUNCTION blob_hash_nil()
-RETURNS blob_hashes AS $$
-	SELECT '00000000000000000000000000000000'::uuid::blob_hashes
+FUNCTION hash_nil()
+RETURNS hashes AS $$
+	SELECT '00000000000000000000000000000000'::uuid::hashes
 $$ LANGUAGE SQL IMMUTABLE;
 
 CREATE OR REPLACE
-FUNCTION blob_hash(bytea) RETURNS blob_hashes AS $$
-	SELECT md5($1)::uuid::blob_hashes
+FUNCTION hash(bytea) RETURNS hashes AS $$
+	SELECT md5($1)::uuid::hashes
 $$ LANGUAGE SQL;
 
 CREATE OR REPLACE
-FUNCTION blob_hash(text) RETURNS blob_hashes AS $$
-	SELECT md5($1)::uuid::blob_hashes
+FUNCTION hash(text) RETURNS hashes AS $$
+	SELECT md5($1)::uuid::hashes
 $$ LANGUAGE SQL;
+
+-- Text is coming soon, but first: Blobs!
+
+-- ** Blobs - Binary Large Objects
+
+-- blob_refs manage sequence of bytes, much like
+-- bytea, without running afoul of PostgreSQL's
+-- max_indexable_field_size().  LIke bytea they avoid
+-- the prohibition of certain characters, e.g. ASCII NUL,
+-- and the complexities of character set encodings.
+-- Blobs cannot be directly rendered as text.
+-- From the viewpoint of the Wicci, Blobs are
+-- opaque values which are passed to clients
+-- in binary chunks when requested.
+
+SELECT create_ref_type('blob_refs');
 
 CREATE TABLE IF NOT EXISTS blob_rows (
 	ref blob_refs PRIMARY KEY,
-	hash_ blob_hashes NOT NULL UNIQUE,
-	chunks blob_hash_arrays NOT NULL CHECK(array_length(chunks, 1) > 0)
+	hash_ hashes NOT NULL UNIQUE,
+	chunks hash_arrays NOT NULL CHECK(array_length(chunks, 1) > 0)
 );
 COMMENT ON TABLE blob_rows IS '
 	unique typed text blobs with unique refs;
@@ -107,24 +135,18 @@ COMMENT ON COLUMN blob_rows.hash_ IS '
 	stable over the evolution of this code???
 ';
 
-CREATE OR REPLACE
-FUNCTION blob_chunks_max_size() RETURNS integer AS $$
-	SELECT 1000000
-$$ language sql IMMUTABLE;
-
-COMMENT ON FUNCTION blob_chunks_max_size()
-IS 'Global parameter!  Adjust for best results!';
+SELECT create_handles_for('blob_rows');
 
 CREATE TABLE IF NOT EXISTS blob_chunks (
-	hash_ blob_hashes NOT NULL UNIQUE,
-	chunk_ bytea NOT NULL,
-	CHECK (length(chunk_) < blob_chunks_max_size())
+	hash_ hashes PRIMARY KEY,
+	chunk_ bytea NOT NULL,				-- indirectly unique!
+	CHECK ( length(chunk_) <= max_blob_chunk_size() )
 );
+
 COMMENT ON TABLE blob_chunks IS '
 	unique byte array blobs indexed by their hashes;
-	they should not be too big to transmit as values
-	to clients; they can be part of larger blobs referenced
-	by blob_rows.
+	not too big to efficiently transmit to clients;
+	can be part of larger blobs	referenced	by blob_rows.
 ';
 
 SELECT declare_ref_class_with_funcs('blob_rows');
@@ -185,25 +207,56 @@ FUNCTION next_text(regclass) RETURNS text_refs AS $$
 	)
 $$ LANGUAGE SQL;
 
--- * Concrete Leaf Classes
+-- ** abstract_text_string_rows
 
--- ** TABLE text_string_rows(ref text_refs,  string_ text)
-
-CREATE TABLE IF NOT EXISTS text_string_rows (
+CREATE TABLE IF NOT EXISTS abstract_text_string_rows (
 	PRIMARY KEY (ref),
-	string_ TEXT NOT NULL UNIQUE
+	string_ TEXT NOT NULL
 ) INHERITS(abstract_text_rows);
-COMMENT ON TABLE text_string_rows IS '
+COMMENT ON TABLE abstract_text_string_rows IS '
 	unique typed text strings with unique refs;
 	their refs may not be shared with other processes;
 	they may be aggressively garbage collected
 ';
 
-ALTER TABLE text_string_rows ALTER COLUMN ref
-	SET DEFAULT next_text( 'text_string_rows' );
+SELECT declare_abstract('abstract_text_string_rows');
 
-SELECT create_key_triggers_for('text_string_rows', 'text_keys');
-SELECT declare_ref_class('text_string_rows');
+-- * Concrete Leaf Classes
+
+-- ** TABLE small_text_string_rows(ref text_refs,  string_ text)
+
+CREATE TABLE IF NOT EXISTS small_text_string_rows (
+	PRIMARY KEY (ref),
+	UNIQUE(string_),
+	CHECK ( length(string_) <= max_indexable_field_size() )
+) INHERITS(abstract_text_string_rows);
+COMMENT ON TABLE small_text_string_rows IS '
+	Unique Text strings no larger than max_indexable_field_size()
+';
+
+ALTER TABLE small_text_string_rows ALTER COLUMN ref
+	SET DEFAULT next_text( 'small_text_string_rows' );
+
+SELECT create_key_triggers_for('small_text_string_rows', 'text_keys');
+SELECT declare_ref_class('small_text_string_rows');
+
+-- ** TABLE big_text_string_rows(ref text_refs,  string_ text)
+
+CREATE TABLE IF NOT EXISTS big_text_string_rows (
+	PRIMARY KEY (ref),
+	hash_ hashes NOT NULL UNIQUE,
+	CHECK ( length(string_) > max_indexable_field_size() )
+) INHERITS(abstract_text_string_rows);
+COMMENT ON TABLE big_text_string_rows IS '
+	Text strings larger than max_indexable_field_size()
+	Indirectly unique via md5 hashes.
+';
+
+ALTER TABLE big_text_string_rows ALTER COLUMN ref
+	SET DEFAULT next_text( 'big_text_string_rows' );
+
+SELECT create_key_triggers_for('big_text_string_rows', 'text_keys');
+SELECT declare_ref_class('big_text_string_rows');
 
 -- *  Text_Refs Tree Classes
 
