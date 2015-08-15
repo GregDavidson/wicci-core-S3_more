@@ -614,7 +614,7 @@ FUNCTION try_get_text_format(text[]) RETURNS integer AS $$
 			SELECT * INTO maybe FROM text_tree_formats WHERE formats = $1;
 			IF FOUND THEN RETURN maybe.id; END IF;
 			IF kilroy_was_here THEN
-				RAISE EXCEPTION '% looping with % %', this, $1;
+				RAISE EXCEPTION '% looping with %', this, $1;
 			END IF;
 			kilroy_was_here := true;
 			BEGIN

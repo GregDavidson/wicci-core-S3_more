@@ -120,7 +120,7 @@ SELECT create_ref_type('blob_refs');
 CREATE TABLE IF NOT EXISTS blob_rows (
 	ref blob_refs PRIMARY KEY,
 	hash_ hashes NOT NULL UNIQUE,
-	chunks hash_arrays NOT NULL CHECK(array_length(chunks, 1) > 0)
+	chunks hash_arrays NOT NULL -- CHECK(array_length(chunks, 1) > 0) -- ???
 );
 COMMENT ON TABLE blob_rows IS '
 	unique typed text blobs with unique refs;
@@ -128,6 +128,7 @@ COMMENT ON TABLE blob_rows IS '
 	they may be aggressively garbage collected
 ';
 COMMENT ON COLUMN blob_rows.hash_ IS '
+	The nil_blob() should have a nil ref, no chunks, value of '''', hash_('''') -- ???
   When length(chunks) == 1, it''s just chunks[1]->hash_;
   Otherwise it''s a hash of the contents of the chunks array.
 	Hmm, would it be better to have it be a hash of the
@@ -151,6 +152,8 @@ COMMENT ON TABLE blob_chunks IS '
 
 SELECT declare_ref_class_with_funcs('blob_rows');
 SELECT create_simple_serial('blob_rows');
+
+INSERT INTO blob_rows (ref, hash_, chunks) VALUES(blob_nil(), hash(''), '{}');
 
 -- ** type text_refs
 
