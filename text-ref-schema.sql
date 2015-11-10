@@ -115,6 +115,10 @@ $$ LANGUAGE SQL;
 -- opaque values which are passed to clients
 -- in binary chunks when requested.
 
+-- It would be great to be able to associate
+-- a mime type with blob rows and for text
+-- types, a character encoding.
+
 SELECT create_ref_type('blob_refs');
 
 CREATE TABLE IF NOT EXISTS blob_rows (
