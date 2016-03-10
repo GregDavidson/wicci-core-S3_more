@@ -12,6 +12,203 @@ SELECT set_file('text_refs-code.sql', '$Id');
 --	as specified in the file LICENSE.md included with this distribution.
 --	All other use requires my permission in writing.
 
+-- * Media Types
+
+-- Syntax of Media Type:
+-- top-level type name / [ tree. ] subtype name [ +suffix ] [ ; parameters ]
+
+-- ** From Media Type
+
+CREATE OR REPLACE
+FUNCTION media_type_text(media_type_refs) RETURNS text AS $$
+  SELECT COALESCE( NULLIF(major_, '_')::text, misc_ -> 'major', 'unknown'  ) -- 'unknown'???
+		|| COALESCE(  '/'
+			|| COALESCE(' ' || NULLIF( NULLIF(tree_, 'standard'), '_') || ' ', '')
+			||  COALESCE( NULLIF(minor_, '')::text, misc_ -> 'minor' ), '' )
+		|| COALESCE(  '+' || COALESCE( NULLIF(suffix_, '_')::text, misc_ -> 'suffix' ), '' )
+		|| CASE WHEN  _charset IS NULL AND _params IS NULL THEN ''
+			ELSE ';'
+				|| COALESCE( ' charset=' || _charset::text , '')
+				|| COALESCE( ' ' || _params, '' )
+			END
+  FROM media_type_rows,
+		COALESCE( NULLIF(charset_, ''), misc_ -> 'charset' ) _charset,
+		COALESCE(misc_ -> 'params') _params
+  WHERE ref = $1
+$$ LANGUAGE SQL STABLE; 
+
+COMMENT ON FUNCTION media_type_text(media_type_refs) IS
+'(1) Although we''re not assuming that minor is text, we
+should replace its NULLIF identity value if it isn''t;
+(2) what if tree_ is "_" instead of "standard"?';
+
+SELECT type_class_op_method(
+	'media_type_refs', 'media_type_rows',
+	'ref_text_op(refs)', 'media_type_text(media_type_refs)'
+);
+
+CREATE OR REPLACE
+FUNCTION try_media_type_encoding(media_type_refs) RETURNS text AS $$
+	SELECT encoding_::text FROM media_type_rows
+	WHERE ref = $1 AND encoding_ != '_'
+$$ LANGUAGE SQL STABLE;
+
+COMMENT ON FUNCTION try_media_type_encoding(media_type_refs)
+IS 'returns PostgreSQL encoding for any text encoded as bytea';
+
+-- ** To Media Type
+
+-- *** Enum Management
+
+CREATE OR REPLACE
+FUNCTION is_enum_type_label(regtype, name) RETURNS boolean AS $$
+	SELECT COALESCE( exists(
+		 SELECT oid FROM pg_enum WHERE enumtypid = $1 AND enumlabel = $2 AND $2 NOT LIKE '\_%'
+	), false )
+$$ LANGUAGE SQL IMMUTABLE;
+
+COMMENT ON FUNCTION is_enum_type_label(regtype, name)
+IS 'Does enum $1 have a label $2 which does not start with an underscore?';
+
+-- *** Parsing
+
+CREATE OR REPLACE
+FUNCTION media_type_pattern() RETURNS text AS $$
+	SELECT '^' || space || '([^[:space:]/]+)'					-- 1 major
+	|| space || '/'	|| space || '(?:([^[:space:].]+)\.)?'		-- 2 tree?
+	|| space || '([^[:space:]+;]+)?'												-- 3 minor?
+	|| space || '(?:\+([^[:space:];]+))?'			-- 4 suffix?
+	|| space || '(?:;'	|| space
+	|| '(?:([cC][hH][aA][rR][sS][eE][tT])' || space || '=)?'			-- 5 charset?
+	|| space || '(.*[^[:space:]][[:space:]]*$)?'			-- 6 parameter value?
+	|| ')?'
+	FROM COALESCE('[[:space:]]*') space
+$$ LANGUAGE SQL IMMUTABLE;
+
+COMMENT ON FUNCTION media_type_pattern()
+IS 'top-level-type-name / [ tree. ] subtype-name [ +suffix ] [ ; [ key = ] parameters ]';
+
+CREATE OR REPLACE
+FUNCTION hstore_trim(hstore) RETURNS hstore AS $$
+	SELECT COALESCE( hstore(
+	  (SELECT array_agg(key)::text[] FROM each($1) WHERE COALESCE(value, '') != ''),
+  	(SELECT array_agg(value)::text[] FROM each($1) WHERE COALESCE(value, '') != '')
+), hstore('') )
+$$ LANGUAGE SQL STABLE;
+
+COMMENT ON FUNCTION hstore_trim(hstore)
+IS 'filter out the pairs whose values are NULL';
+
+CREATE OR REPLACE
+FUNCTION try_parse_media_type(text) RETURNS media_type_rows AS $$
+	SELECT ROW(
+		media_type_nil(),
+		CASE WHEN enum_major THEN _major ELSE '_' END::media_type_major,
+		CASE WHEN enum_tree THEN _tree ELSE 'standard' END::media_type_tree,
+		_minor,
+		CASE WHEN enum_suffix THEN _suffix ELSE '_' END::media_type_suffix,
+		CASE WHEN _charset = 'charset' THEN _param ELSE '' END,
+		'_',
+		hstore_trim( hstore(
+			ARRAY['major', 'tree', 'suffix', 'misc'],
+			ARRAY[
+				CASE WHEN enum_major THEN NULL ELSE _major END::text,
+				CASE WHEN enum_tree THEN NULL ELSE _tree END::text,
+				CASE WHEN enum_suffix THEN NULL ELSE _suffix END::text,
+				CASE WHEN _charset = 'charset' THEN NULL ELSE _param END::text
+			]
+		) )
+	)::media_type_rows
+	FROM
+ 		try_str_match($1, media_type_pattern()) part,
+		lower(part[1]) _major,
+		is_enum_type_label('media_type_major', _major) enum_major,
+		lower(part[2]) _tree,
+		is_enum_type_label('media_type_tree', _tree) enum_tree,
+		COALESCE(lower(part[3]), '') _minor,
+		lower(part[4]) _suffix,
+		is_enum_type_label('media_type_suffix', _suffix) enum_suffix,
+		COALESCE(lower(part[5]), '') _charset,
+		COALESCE(lower(part[6]), '') _param
+$$ LANGUAGE SQL STABLE;
+
+CREATE OR REPLACE
+FUNCTION media_encoding(mt media_type_rows)
+RETURNS pg_text_encodings AS $$
+	SELECT CASE lower((mt).charset_)
+		WHEN '' THEN 'LATIN1'::pg_text_encodings
+		WHEN 'utf-8' THEN 'UTF8'::pg_text_encodings
+		WHEN 'iso-8859-1' THEN 'LATIN1'::pg_text_encodings
+		WHEN 'iso-8859-2' THEN 'LATIN2'::pg_text_encodings
+		WHEN 'iso-8859-3' THEN 'LATIN3'::pg_text_encodings
+		WHEN 'iso-8859-4' THEN 'LATIN4'::pg_text_encodings
+		WHEN 'iso-8859-5' THEN 'ISO_8859_5'::pg_text_encodings
+		WHEN 'iso-8859-6' THEN 'ISO_8859_6'::pg_text_encodings
+		WHEN 'iso-8859-7' THEN 'ISO_8859_7'::pg_text_encodings
+		WHEN 'iso-8859-8' THEN 'ISO_8859_8'::pg_text_encodings
+		WHEN 'iso-8859-9' THEN 'LATIN5'::pg_text_encodings
+		WHEN 'iso-8859-10' THEN 'LATIN6'::pg_text_encodings
+		WHEN 'iso-8859-13' THEN 'LATIN7'::pg_text_encodings
+		WHEN 'iso-8859-14' THEN 'LATIN8'::pg_text_encodings
+		WHEN 'iso-8859-15' THEN 'LATIN9'::pg_text_encodings
+		WHEN 'iso-8859-16' THEN 'LATIN10'::pg_text_encodings
+		ELSE CASE
+			 WHEN (mt).major_ = 'text'	THEN	'UTF8'::pg_text_encodings
+			ELSE'_'::pg_text_encodings
+		END
+END
+$$ LANGUAGE SQL STABLE;
+
+COMMENT ON FUNCTION media_encoding(media_type_rows)
+IS 'Need to finish and improve mapping from valid Media Types to PostgreSQL charset encodings';
+
+-- *** Getting New or Old Media Type
+
+CREATE OR REPLACE
+FUNCTION try_get_media_type(mt media_type_rows)
+RETURNS media_type_refs AS $$
+DECLARE
+	maybe media_type_refs;
+	kilroy_was_here boolean := false;
+	this regprocedure := 'try_get_media_type(media_type_rows%type)';
+	_encoding pg_text_encodings := media_encoding($1);
+BEGIN
+	LOOP
+		SELECT INTO maybe ref FROM media_type_rows
+		WHERE major_ = (mt).major_ AND tree_ = (mt).tree_
+		AND minor_ = (mt).minor_ AND suffix_ = (mt).suffix_
+		AND charset_ = (mt).charset_ AND encoding_ = _encoding
+		AND misc_ = (mt).misc_;
+		IF FOUND THEN RETURN maybe; END IF;
+		IF kilroy_was_here THEN
+			RAISE EXCEPTION '% looping with % %', this, $1, _encoding;
+		END IF;
+		kilroy_was_here := true;
+		BEGIN
+			INSERT INTO media_type_rows(major_, tree_, minor_, suffix_, charset_, encoding_, misc_)
+			VALUES ( (mt).major_, (mt).tree_, (mt).minor, (mt).suffix_, (mt).charset_, _encoding, (mt).misc_ );
+		EXCEPTION
+			WHEN unique_violation THEN			-- another thread??
+				RAISE NOTICE '% % % raised %!', this, $1, _encoding, 'unique_violation';
+		END;	
+	END LOOP;
+END;
+$$ LANGUAGE plpgsql STRICT;
+
+CREATE OR REPLACE
+FUNCTION try_get_media_type(text) 
+RETURNS media_type_refs AS $$
+	SELECT try_get_media_type(try_parse_media_type($1))
+$$ LANGUAGE SQL STABLE STRICT;
+
+CREATE OR REPLACE
+FUNCTION get_media_type(text)
+RETURNS media_type_refs AS $$
+	SELECT non_null(
+		try_get_media_type($1), 'get_media_type(text)'
+	)
+$$ LANGUAGE SQL STABLE;
+
 -- * Virtual Text Leaf Classes
 
 -- ** text_nil_text

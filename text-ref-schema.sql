@@ -28,11 +28,148 @@ SELECT set_file('text_refs-schema.sql', '$Id');
 -- Environment references giving context for
 -- rendering and interpreting the text.
 
--- *** Size Limits
+-- ** Media Types
+
+-- We need to know, for any hunk of bytes that is part of a document,
+-- what kind of thing it represents, how it is encoded (this is often layered)
+-- how we're supposed to refer to its type on output and how we're
+-- supposed to recognize its type when we read it.
+
+-- Syntax of Media Type:
+-- top-level type name / [ tree. ] subtype name [ +suffix ] [ ; parameters ]
+
+-- Example syntax in an HTTP header:
+-- Content-Type: text/html; charset=ISO-8859-4
+
+-- Example in a web page:
+-- <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+
+-- We should be able to greatly simplify the representations internally by
+-- undoing some transfer encodings, e.g. hex, cgi-encoded text, etc.
+-- leaving some transfer-encoded values uninterpreted
+-- converting all text formats to utf8
+
+DROP TYPE IF EXISTS media_type_major CASCADE;
+
+CREATE TYPE media_type_major AS ENUM (
+  '_',													-- none, nil
+  'application', 'audio', 'example', 'image', 'message',
+	'model', 'multipart', 'text', 'video'
+);
+
+DROP TYPE IF EXISTS media_type_tree CASCADE;
+
+CREATE TYPE media_type_tree AS ENUM (
+  '_',													-- none, nil
+  'standard',										-- not shown
+  'vendor',										-- vnd. tree
+  'personal',									-- aka vanity
+  'unregistered'							-- x. tree
+);
+
+COMMENT ON TYPE media_type_tree IS
+'Do we need "_" as well as "standard"??';
+
+DROP TYPE IF EXISTS media_type_suffix CASCADE;
+
+CREATE TYPE media_type_suffix AS ENUM (
+  '_',													-- none, nil
+  'xml', 'json', 'ber', 'der', 'fastinfoset',
+  'wbxml', 'zip', 'cbor'
+);
+
+DROP TYPE IF EXISTS pg_text_encodings CASCADE;
+
+-- pg really should have an official enum for this!
+CREATE TYPE pg_text_encodings AS ENUM (
+	'_',			-- none, nil
+  'BIG5',				-- 	Big Five, Traditional Chinese, WIN950, Windows950
+  'EUC_CN',		-- 	Extended UNIX Code-CN, Simplified Chinese
+  'EUC_JP',			-- 	Extended UNIX Code-JP, Japanese
+  'EUC_JIS_2004',	-- 	Extended UNIX Code-JP, JIS X 0213,	Japanese
+  'EUC_KR',			-- 	Extended UNIX Code-KR, Korean
+  'EUC_TW',			-- 	Extended UNIX Code-TW,	Traditional Chinese, Taiwanese
+  'GB18030',		-- 	National Standard,	Chinese
+  'GBK',			-- 	Extended National Standard, Simplified Chinese, WIN936, Windows936
+  'ISO_8859_5',		-- 	ISO 8859-5, ECMA 113, Latin/Cyrillic
+  'ISO_8859_6',		-- 	ISO 8859-6, ECMA 114, Latin/Arabic
+  'ISO_8859_7',		-- 	ISO 8859-7, ECMA 118, Latin/Greek
+  'ISO_8859_8',		-- 	ISO 8859-8, ECMA 121, Latin/Hebrew
+  'JOHAB',			-- 	JOHAB 	Korean (Hangul)
+  'KOI8R',			-- 	KOI8-R 	Cyrillic (Russian), 	KOI8
+  'KOI8U',			-- 	KOI8-U 	Cyrillic (Ukrainian)
+  'LATIN1',		-- 	ISO 8859-1, ECMA 94 	Western European
+  'LATIN2',		-- 	ISO 8859-2, ECMA 94 	Central European
+  'LATIN3',		-- 	ISO 8859-3, ECMA 94 	South European
+  'LATIN4',		-- 	ISO 8859-4, ECMA 94 	North European
+  'LATIN5',		-- 	ISO 8859-9, ECMA 128 	Turkish
+  'LATIN6',		-- 	ISO 8859-10, ECMA 144 	Nordic
+  'LATIN7',		-- 	ISO 8859-13 	Baltic
+  'LATIN8',		-- 	ISO 8859-14 	Celtic
+  'LATIN9',		-- 	ISO 8859-15 	LATIN1 with Euro and accents
+  'LATIN10',	-- 	ISO 8859-16, ASRO SR 14111 	Romanian
+  'MULE_INTERNAL',	-- 	Mule internal code 	Multilingual Emacs
+  'SJIS',			-- 	Shift JIS, 	Japanese, Mskanji, ShiftJIS, WIN932, Windows932
+  'SHIFT_JIS_2004',	-- 	Shift JIS, JIS X 0213, 	Japanese
+  'SQL_ASCII',		-- 	interpretation of any non-7-bit values unspecified
+  'UHC',			-- 	Unified Hangul Code, Korean,	WIN949, Windows949
+  'UTF8',			-- 	Unicode, 8-bit encoded
+  'WIN866',			-- 	Windows CP866, Cyrillic
+  'WIN874',			-- 	Windows CP874, Thai
+  'WIN1250',		-- 	Windows CP1250, Central European
+  'WIN1251',		-- 	Windows CP1251, Cyrillic
+  'WIN1252',		-- 	Windows CP1252, Western European
+  'WIN1253',		-- 	Windows CP1253, Greek
+  'WIN1254',		-- 	Windows CP1254, Turkish
+  'WIN1255',		-- 	Windows CP1255, Hebrew
+  'WIN1256',		-- 	Windows CP1256, Arabic
+  'WIN1257',		-- 	Windows CP1257, Baltic
+  'WIN1258'		-- 	Windows CP1258, Vietnamese,	ABC, TCVN, TCVN5712, VSCII
+);
+
+SELECT create_ref_type('media_type_refs');
+
+CREATE TABLE IF NOT EXISTS media_type_rows (
+	ref media_type_refs PRIMARY KEY,
+	major_ media_type_major NOT NULL,	
+	tree_ media_type_tree NOT NULL,	
+	minor_ text NOT NULL,						-- depends on tree_
+  suffix_ media_type_suffix NOT NULL,
+  charset_ text NOT NULL,
+  encoding_ pg_text_encodings NOT NULL,
+  misc_ hstore NOT NULL,
+	UNIQUE(major_, tree_, minor_, suffix_, charset_, encoding_, misc_)
+);
+
+COMMENT ON TABLE media_type_rows IS '
+  A Media Type for, e.g. HTTP & HTML as well as
+  the PostgreSQL character encoding when the
+  representation is text.
+';
+
+COMMENT ON COLUMN media_type_rows.minor_ IS '
+  A subtype name dependent on the major_ type
+  and the registration tree_
+';
+
+COMMENT ON COLUMN media_type_rows.misc_ IS
+'field_name (w/o _) => non-standard value of that field,
+	regular field value should be nil;
+params => parameter(s) other than charset
+';
+
+SELECT declare_ref_class_with_funcs('media_type_rows');
+SELECT create_simple_serial('media_type_rows');
+
+INSERT INTO media_type_rows ( ref, major_, tree_, minor_, suffix_, charset_, encoding_, misc_ )
+VALUES(media_type_nil(), '_', '_', '', '_', '', '_', '');
+
+-- ** Size Limits
 
 -- While PostgreSQL allows text and bytea values to be
 -- very large, if they're more than a third of a buffer page
 -- they can't be indexed!!
+-- Is there a portable way of obtaining that cutoff size???
 
 CREATE OR REPLACE
 FUNCTION max_indexable_field_size() RETURNS integer AS $$
@@ -114,6 +251,10 @@ $$ LANGUAGE SQL;
 -- From the viewpoint of the Wicci, Blobs are
 -- opaque values which are passed to clients
 -- in binary chunks when requested.
+
+-- It would be great to be able to associate
+-- a mime type with blob rows and for text
+-- types, a character encoding.
 
 SELECT create_ref_type('blob_refs');
 
