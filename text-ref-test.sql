@@ -84,6 +84,7 @@ SELECT test_func(
 			 'Hello World'
 );
 
+-- Right now, 28 May 2019, this crashes the server!!!
 SELECT test_func(
 	'text_nil_text(text_refs)',
 	ref_text_op( text_nil() ),
