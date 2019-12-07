@@ -911,7 +911,7 @@ SELECT type_class_op_method(
 CREATE OR REPLACE
 FUNCTION text_refs_ready() RETURNS void AS $$
 BEGIN
-	PERFORM refs_ready();
+	PERFORM s1_refs.ensure_schema_ready();
 -- Check sufficient elements of the Text_Refs
 -- dependency tree that we can be assured that
 -- all of its modules have been loaded.
